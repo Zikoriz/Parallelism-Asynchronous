@@ -1,10 +1,13 @@
 import asyncio
 import time
 
+import logging
+
 import aiohttp
+import pytest
 from aioresponses import aioresponses
 
-from client import AsyncHTTPClient, FetchResult, Fetcher
+from client import AsyncCrawler, AsyncHTTPClient, FetchResult, Fetcher
 from config import Config
 
 
@@ -19,12 +22,14 @@ async def test_fetch_success():
     assert r.elapsed >= 0 and r.error is None
 
 
-async def test_fetch_non_200_is_still_a_response():
+@pytest.mark.parametrize("status", [404, 500])
+async def test_http_error_status_is_failure(status):
     with aioresponses() as m:
-        m.get("http://x.test/missing", status=404, body="nope")
+        m.get("http://x.test/err", status=status, body="nope")
         async with AsyncHTTPClient() as client:
-            r = await client.fetch("http://x.test/missing")
-    assert r.success and r.status == 404
+            r = await client.fetch("http://x.test/err")
+    assert not r.success and r.status == status
+    assert "ClientResponseError" in r.error
 
 
 async def test_client_error_returned_not_raised():
@@ -93,3 +98,62 @@ async def test_fetch_many_50_urls_parallel_and_bounded():
     assert len(results) == 50 and all(r.success for r in results)
     assert client.peak == 10  # never above max_concurrency, and actually reaches it
     assert elapsed < 50 * 0.1 / 2  # sequential would take 5s; ~0.5s expected
+
+
+async def test_session_uses_connect_and_read_timeouts():
+    cfg = Config(total_timeout=30, connect_timeout=3, read_timeout=7)
+    async with AsyncHTTPClient(cfg) as client:
+        timeout = client._session.timeout
+    assert (timeout.total, timeout.connect, timeout.sock_read) == (30, 3, 7)
+
+
+async def test_fetch_logs_start_success_and_error(caplog):
+    caplog.set_level(logging.INFO, logger="client")
+    with aioresponses() as m:
+        m.get("http://x.test/ok", body="ok")
+        m.get("http://x.test/down", exception=aiohttp.ClientConnectionError("down"))
+        async with AsyncHTTPClient() as client:
+            await client.fetch("http://x.test/ok")
+            await client.fetch("http://x.test/down")
+    messages = [(r.levelno, r.getMessage()) for r in caplog.records]
+    assert (logging.INFO, "Fetching http://x.test/ok") in messages
+    assert any(lvl == logging.INFO and msg.startswith("Fetched http://x.test/ok: 200") for lvl, msg in messages)
+    assert any(
+        lvl == logging.WARNING and "http://x.test/down" in msg and "ClientConnectionError" in msg
+        for lvl, msg in messages
+    )
+
+
+async def test_crawler_fetch_url_returns_html():
+    with aioresponses() as m:
+        m.get("http://x.test/page", body="<html>hi</html>")
+        crawler = AsyncCrawler(max_concurrent=5)
+        try:
+            html = await crawler.fetch_url("http://x.test/page")
+        finally:
+            await crawler.close()
+    assert html == "<html>hi</html>"
+
+
+async def test_crawler_fetch_urls_returns_dict_and_survives_errors():
+    urls = ["http://x.test/1", "http://x.test/404", "http://x.test/down"]
+    with aioresponses() as m:
+        m.get(urls[0], body="one")
+        m.get(urls[1], status=404)
+        m.get(urls[2], exception=asyncio.TimeoutError())
+        crawler = AsyncCrawler()
+        results = await crawler.fetch_urls(urls)
+        await crawler.close()
+    assert results == {urls[0]: "one", urls[1]: "", urls[2]: ""}
+
+
+async def test_crawler_respects_max_concurrent_and_closes():
+    crawler = AsyncCrawler(max_concurrent=3)
+    assert crawler.config.max_concurrency == 3
+    slow = SlowClient(delay=0.05)
+    crawler._fetcher.client = slow
+    await crawler.fetch_urls([f"http://x.test/{i}" for i in range(10)])
+    assert slow.peak == 3
+    session = crawler._client._session
+    await crawler.close()
+    assert session.closed
