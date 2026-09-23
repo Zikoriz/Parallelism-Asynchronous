@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html>
+<head><title>Edge cases</title></head>
+<body>
+  <a href="/about">relative to root</a>
+  <a href="page.html">relative to current dir</a>
+  <a href="../up.html">parent dir</a>
+  <a href="https://other.test/x">absolute other domain</a>
+  <a href="//cdn.test/lib">protocol-relative</a>
+  <a href="/about#team">same page with fragment</a>
+  <a href="/about">duplicate</a>
+  <a href="  /spaced  ">whitespace around href</a>
+  <a href="#top">anchor only</a>
+  <a href="">empty href</a>
+  <a>no href</a>
+  <a href="mailto:me@site.test">mail</a>
+  <a href="javascript:void(0)">js</a>
+  <a href="JavaScript:alert(1)">js upper-case</a>
+  <a href="tel:+100">phone</a>
+  <a href="ftp://files.test/f">ftp</a>
+  <a href="data:text/html,hi">data</a>
+</body>
+</html>
