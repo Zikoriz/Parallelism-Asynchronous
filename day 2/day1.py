@@ -11,7 +11,7 @@ _DAY1 = Path(__file__).resolve().parent.parent / "day 1"
 if str(_DAY1) not in sys.path:
     sys.path.append(str(_DAY1))
 
-from client import AsyncHTTPClient, FetchResult, Fetcher  # noqa: E402
+from client import AsyncCrawler, AsyncHTTPClient, FetchResult, Fetcher  # noqa: E402
 from config import Config  # noqa: E402
 
-__all__ = ["AsyncHTTPClient", "Config", "FetchResult", "Fetcher"]
+__all__ = ["AsyncCrawler", "AsyncHTTPClient", "Config", "FetchResult", "Fetcher"]

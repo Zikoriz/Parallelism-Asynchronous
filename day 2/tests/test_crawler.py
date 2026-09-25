@@ -1,7 +1,8 @@
 from aioresponses import aioresponses
 from yarl import URL
 
-from crawler import Crawler
+from crawler import AsyncCrawler, Crawler
+from day1 import AsyncCrawler as Day1AsyncCrawler
 from day1 import AsyncHTTPClient, Config
 from queue_manager import normalize_url
 
@@ -127,3 +128,73 @@ async def test_non_html_response_is_not_parsed():
     img = next(p for p in pages if p.url.endswith("img.png"))
     assert img.success and img.links == [] and img.data == {}
     assert len(pages) == 2
+
+
+# --- AsyncCrawler.fetch_and_parse (day 1 interface + parsing) ----------------
+
+REQUIRED_KEYS = {"url", "title", "text", "links", "metadata"}
+ARTICLE = """<html lang="en"><head><title>Article</title>
+<meta name="description" content="About things"><meta name="keywords" content="a, b"></head>
+<body><h1>Main</h1><p>Body text</p><img src="/i.png" alt="pic">
+<a href="/next">next</a><a href="mailto:x@site.test">mail</a>
+<ul><li>one</li></ul><table><tr><th>k</th></tr><tr><td>v</td></tr></table></body></html>"""
+
+
+async def test_async_crawler_extends_day1_interface():
+    assert issubclass(AsyncCrawler, Day1AsyncCrawler)
+    with aioresponses() as m:
+        m.get(ROOT, body=ARTICLE, content_type="text/html")
+        async with AsyncCrawler(max_concurrent=2) as crawler:
+            assert await crawler.fetch_url(ROOT) == ARTICLE  # day 1 method still works
+
+
+async def test_fetch_and_parse_returns_required_fields():
+    with aioresponses() as m:
+        m.get(ROOT, body=ARTICLE, content_type="text/html")
+        async with AsyncCrawler() as crawler:
+            page = await crawler.fetch_and_parse(ROOT)
+
+    assert REQUIRED_KEYS <= set(page)
+    assert page["url"] == ROOT
+    assert page["title"] == "Article"
+    assert page["text"] == "Main Body text next mail one k v"
+    assert page["links"] == ["http://site.test/next"]
+    assert page["metadata"] == {
+        "title": "Article", "description": "About things", "keywords": ["a", "b"],
+        "canonical": None, "language": "en",
+    }
+    assert page["images"] == [{"src": "http://site.test/i.png", "alt": "pic"}]
+    assert page["headings"]["h1"] == ["Main"]
+    assert page["lists"] == [{"type": "ul", "items": ["one"]}]
+    assert page["tables"] == [{"headers": ["k"], "rows": [["v"]]}]
+    assert page["status"] == 200 and page["error"] is None
+
+
+async def test_fetch_and_parse_failure_gives_empty_fields_not_exception():
+    with aioresponses() as m:
+        m.get("http://site.test/c", status=404)
+        async with AsyncCrawler() as crawler:
+            page = await crawler.fetch_and_parse("http://site.test/c")
+    assert REQUIRED_KEYS <= set(page)
+    assert page["url"] == "http://site.test/c"
+    assert page["title"] is None and page["text"] == "" and page["links"] == []
+    assert page["status"] == 404 and "ClientResponseError" in page["error"]
+
+
+async def test_fetch_and_parse_skips_non_html():
+    with aioresponses() as m:
+        m.get(ROOT, body=b"\x89PNG<a href='/x'>", content_type="image/png")
+        async with AsyncCrawler() as crawler:
+            page = await crawler.fetch_and_parse(ROOT)
+    assert page["status"] == 200 and page["links"] == [] and page["text"] == ""
+
+
+async def test_fetch_and_parse_many_keeps_order():
+    urls = [ROOT, "http://site.test/a", "http://site.test/c"]
+    with aioresponses() as m:
+        mock_site(m, SITE)
+        m.get("http://site.test/c", status=404)
+        async with AsyncCrawler(max_concurrent=2) as crawler:
+            pages = await crawler.fetch_and_parse_many(urls)
+    assert [p["url"] for p in pages] == urls
+    assert [p["title"] for p in pages] == ["home", "a", None]

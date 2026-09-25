@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from bs4 import BeautifulSoup
 
 from html_parser import DEFAULT_SELECTORS, HTMLParser
 
@@ -135,3 +136,157 @@ def test_text_whitespace_is_collapsed(parser):
 def test_default_selectors_used_when_none_given(parser):
     html = '<title> Hi </title><meta name="description" content=" About us ">'
     assert parser.extract_data(html) == {"title": "Hi", "description": "About us"}
+
+
+# --- parse_html / soup-based interface ----------------------------------------
+
+async def test_parse_html_returns_soup_usable_by_every_extractor(parser):
+    soup = await parser.parse_html(load("books_product.html"))
+    assert isinstance(soup, BeautifulSoup)
+    assert parser.extract_links(soup, PRODUCT_URL) == parser.extract_links(load("books_product.html"), PRODUCT_URL)
+    assert parser.extract_data(soup)["title"] == "A Light in the Attic | Books to Scrape - Sandbox"
+
+
+@pytest.mark.parametrize("html", ["", None, "<<<>>>", "</div></html>"])
+async def test_parse_html_on_empty_or_garbage_page(parser, html):
+    soup = await parser.parse_html(html)
+    assert isinstance(parser.extract_text(soup), str)
+    assert parser.extract_links(soup, "http://site.test/") == []
+    assert parser.extract_tables(soup) == [] and parser.extract_lists(soup) == []
+
+
+# --- extract_text ------------------------------------------------------------
+
+def test_text_skips_scripts_styles_comments_and_doctype(parser):
+    html = """<!DOCTYPE html><html><head><title>T</title><style>p{color:red}</style>
+    <script>var x = "<b>no</b>";</script></head><body><!-- hidden --><h1>Hello</h1>
+    <p>world\n  and <b>more</b></p><noscript>enable js</noscript></body></html>"""
+    assert parser.extract_text(html) == "Hello world and more"
+
+
+def test_text_on_saved_product_page(parser):
+    text = parser.extract_text(load("books_product.html"))
+    assert text.startswith("Books to Scrape We love being scraped! Home Books Poetry A Light in the Attic")
+    assert "£51.77" in text and "Product Information" in text
+    assert "html" not in text.split()[:3]  # doctype is not text
+    assert "\n" not in text and "  " not in text
+
+
+def test_text_on_broken_html_with_unclosed_head(parser):
+    assert parser.extract_text(load("broken.html")) == "10.00 next page other unterminated paragraph"
+
+
+@pytest.mark.parametrize("html", ["", None, "   ", "<html></html>"])
+def test_text_on_empty_page(parser, html):
+    assert parser.extract_text(html) == ""
+
+
+# --- extract_metadata --------------------------------------------------------
+
+def test_metadata_on_saved_product_page(parser):
+    meta = parser.extract_metadata(load("books_product.html"))
+    assert meta["title"] == "A Light in the Attic | Books to Scrape - Sandbox"
+    assert meta["description"].startswith("It's hard to imagine a world without A Light in the Attic.")
+    assert meta["keywords"] == []
+    assert meta["language"] == "en-us"
+
+
+def test_metadata_keywords_canonical_and_case_insensitive_names(parser):
+    html = """<html lang="uk"><head><title> Shop </title>
+    <meta name="Description" content=" Best shop ">
+    <meta name="KEYWORDS" content="books, python , ,async">
+    <link rel="canonical" href="https://shop.test/"></head></html>"""
+    assert parser.extract_metadata(html) == {
+        "title": "Shop",
+        "description": "Best shop",
+        "keywords": ["books", "python", "async"],
+        "canonical": "https://shop.test/",
+        "language": "uk",
+    }
+
+
+@pytest.mark.parametrize("html", ["", None, "<<<>>>"])
+def test_metadata_on_empty_page(parser, html):
+    assert parser.extract_metadata(html) == {
+        "title": None, "description": None, "keywords": [], "canonical": None, "language": None,
+    }
+
+
+# --- images, headings, tables, lists -----------------------------------------
+
+def test_images_are_absolute_with_alt(parser):
+    assert parser.extract_images(load("books_product.html"), PRODUCT_URL) == [{
+        "src": "http://books.toscrape.com/media/cache/fe/72/fe72f0532301ec28892ae79a629a293c.jpg",
+        "alt": "A Light in the Attic",
+    }]
+    images = parser.extract_images(load("books_index.html"), INDEX_URL)
+    assert len(images) == 20
+    assert all(i["src"].startswith("http://books.toscrape.com/media/") for i in images)
+
+
+def test_images_skip_empty_src_and_honour_base(parser):
+    html = '<base href="http://cdn.test/"><img src="a.png"><img src=" "><img alt="x"><img src="b.png" alt="">'
+    assert parser.extract_images(html, "http://site.test/") == [
+        {"src": "http://cdn.test/a.png", "alt": None},
+        {"src": "http://cdn.test/b.png", "alt": ""},
+    ]
+
+
+def test_headings(parser):
+    assert parser.extract_headings(load("books_product.html")) == {
+        "h1": ["A Light in the Attic"],
+        "h2": ["Product Description", "Product Information"],
+        "h3": [],
+    }
+    index = parser.extract_headings(load("books_index.html"))
+    assert index["h1"] == ["All products"] and len(index["h3"]) == 20
+    assert parser.extract_headings("<h1> </h1><h4>no</h4>") == {"h1": [], "h2": [], "h3": []}
+
+
+def test_key_value_table_on_saved_product_page(parser):
+    [table] = parser.extract_tables(load("books_product.html"))
+    assert table["headers"] == []
+    assert table["rows"][0] == ["UPC", "a897fe39b1053632"]
+    assert ["Price (excl. tax)", "£51.77"] in table["rows"]
+    assert len(table["rows"]) == 7
+
+
+def test_table_with_header_row_and_nested_table(parser):
+    html = """<table><thead><tr><th>Name</th><th>Qty</th></tr></thead>
+    <tbody><tr><td>apple</td><td>3</td></tr>
+    <tr><td>box</td><td><table><tr><td>inner</td></tr></table></td></tr></tbody></table>
+    <table></table>"""
+    outer, inner = parser.extract_tables(html)
+    assert outer["headers"] == ["Name", "Qty"]
+    assert outer["rows"] == [["apple", "3"], ["box", "inner"]]
+    assert inner == {"headers": [], "rows": [["inner"]]}
+
+
+def test_lists(parser):
+    html = "<ul><li>a</li><li> b </li><li></li></ul><ol><li>one<ul><li>x</li></ul></li></ol><ul></ul>"
+    assert parser.extract_lists(html) == [
+        {"type": "ul", "items": ["a", "b"]},
+        {"type": "ol", "items": ["one x"]},
+        {"type": "ul", "items": ["x"]},
+    ]
+    assert parser.extract_lists(load("books_product.html")) == [
+        {"type": "ul", "items": ["Home", "Books", "Poetry", "A Light in the Attic"]},
+    ]
+
+
+# --- parse (full page breakdown) ---------------------------------------------
+
+async def test_parse_returns_all_sections(parser):
+    page = await parser.parse(load("books_product.html"), PRODUCT_URL)
+    assert set(page) == {"url", "title", "text", "links", "metadata", "images", "headings", "tables", "lists"}
+    assert page["url"] == PRODUCT_URL
+    assert page["title"] == page["metadata"]["title"] == "A Light in the Attic | Books to Scrape - Sandbox"
+    assert page["links"] == parser.extract_links(load("books_product.html"), PRODUCT_URL)
+    assert page["headings"]["h1"] == ["A Light in the Attic"]
+    assert len(page["tables"]) == 1 and len(page["images"]) == 1
+
+
+async def test_parse_empty_page(parser):
+    page = await parser.parse("", "http://site.test/")
+    assert page["title"] is None and page["text"] == "" and page["links"] == []
+    assert page["images"] == [] and page["tables"] == [] and page["lists"] == []
