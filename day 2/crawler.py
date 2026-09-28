@@ -95,7 +95,7 @@ class Crawler:
             return PageResult(url=url, depth=depth, success=False, status=fetched.status, error=fetched.error)
         page = PageResult(url=url, depth=depth, success=True, status=fetched.status)
         if _is_html(fetched.headers):
-            soup = await self.parser.parse_html(fetched.body)  # parsed once, shared by both extractors
+            soup = await self.parser.make_soup(fetched.body)  # parsed once, shared by both extractors
             page.data = self.parser.extract_data(soup, self.selectors)
             page.links = self.parser.extract_links(soup, url)
         return page
@@ -105,7 +105,7 @@ class AsyncCrawler(Day1AsyncCrawler):
     """Day 1 AsyncCrawler + parsing: fetch_and_parse(url) -> page breakdown dict.
 
     The dict always has url, title, text, links, metadata (plus images, headings,
-    tables, lists from HTMLParser.parse) and status/error. A failed fetch or a
+    tables, lists from HTMLParser.parse_html) and status/error. A failed fetch or a
     non-HTML response yields empty fields instead of an exception.
     """
 
@@ -125,9 +125,9 @@ class AsyncCrawler(Day1AsyncCrawler):
 
     async def _parse_result(self, fetched: FetchResult) -> dict:
         if fetched.success and _is_html(fetched.headers):
-            page = await self.parser.parse(fetched.body, fetched.url)
+            page = await self.parser.parse_html(fetched.body, fetched.url)
         else:
-            page = await self.parser.parse("", fetched.url)  # same keys, empty values
+            page = await self.parser.parse_html("", fetched.url)  # same keys, empty values
         page["status"] = fetched.status
         page["error"] = fetched.error
         return page

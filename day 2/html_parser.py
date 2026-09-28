@@ -23,14 +23,15 @@ Markup = str | BeautifulSoup | None
 class HTMLParser:
     """Parses HTML with BeautifulSoup and extracts links, text, metadata and structured content.
 
-    Every extractor accepts either a ready BeautifulSoup (from parse_html) or a raw HTML
-    string, so a page can be parsed once and reused. Tolerant to broken markup and empty pages.
+    parse_html(html, url) returns the full page breakdown dict. Every extractor accepts either
+    a ready BeautifulSoup (from make_soup) or a raw HTML string, so a page can be parsed once
+    and reused. Tolerant to broken markup and empty pages.
     """
 
     def __init__(self, features: str = "html.parser"):
         self.features = features
 
-    async def parse_html(self, html: str | None) -> BeautifulSoup:
+    async def make_soup(self, html: str | None) -> BeautifulSoup:
         """Build the soup in a worker thread: parsing is CPU-bound and would block the event loop."""
         return await asyncio.to_thread(self._soup, html)
 
@@ -63,13 +64,19 @@ class HTMLParser:
                 links.append(url)
         return links
 
-    def extract_text(self, soup: Markup) -> str:
-        """Visible text of the page: scripts, styles, <title>, comments and doctype skipped, whitespace collapsed."""
+    def extract_text(self, soup: Markup, selector: str | None = None) -> str:
+        """Visible text: scripts, styles, <title>, comments and doctype skipped, whitespace collapsed.
+
+        With a CSS selector only the matching elements are used (joined in document order);
+        no match yields "". The non-content filter applies inside the matched element only,
+        so selector="title" still returns the title text.
+        """
         soup = self._soup(soup)
+        roots = soup.select(selector) if selector else [soup]
         parts = [
-            s for s in soup.find_all(string=True)
+            s for root in roots for s in root.find_all(string=True)
             if not isinstance(s, PreformattedString)  # comments, doctype, CDATA
-            and not any(p.name in NON_CONTENT_TAGS for p in s.parents)
+            and not _inside(s, NON_CONTENT_TAGS, root)
         ]
         return " ".join(" ".join(parts).split())
 
@@ -145,9 +152,9 @@ class HTMLParser:
                 lists.append({"type": lst.name, "items": items})
         return lists
 
-    async def parse(self, html: str | None, url: str) -> dict:
+    async def parse_html(self, html: str | None, url: str) -> dict:
         """Full page breakdown: url, title, text, links, metadata, images, headings, tables, lists."""
-        soup = await self.parse_html(html)
+        soup = await self.make_soup(html)
         metadata = self.extract_metadata(soup)
         return {
             "url": url,
@@ -192,6 +199,16 @@ class HTMLParser:
                 value = " ".join(value)
             return value.strip() if value is not None else None
         return _text(el)
+
+
+def _inside(node, tag_names: frozenset[str], root) -> bool:
+    """True if node sits in one of tag_names strictly below root (root itself is never filtered)."""
+    for parent in node.parents:
+        if parent is root:
+            return False
+        if parent.name in tag_names:
+            return True
+    return False
 
 
 def _text(el) -> str:

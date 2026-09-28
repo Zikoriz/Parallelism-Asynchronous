@@ -138,18 +138,18 @@ def test_default_selectors_used_when_none_given(parser):
     assert parser.extract_data(html) == {"title": "Hi", "description": "About us"}
 
 
-# --- parse_html / soup-based interface ----------------------------------------
+# --- make_soup / soup-based interface ----------------------------------------
 
-async def test_parse_html_returns_soup_usable_by_every_extractor(parser):
-    soup = await parser.parse_html(load("books_product.html"))
+async def test_make_soup_returns_soup_usable_by_every_extractor(parser):
+    soup = await parser.make_soup(load("books_product.html"))
     assert isinstance(soup, BeautifulSoup)
     assert parser.extract_links(soup, PRODUCT_URL) == parser.extract_links(load("books_product.html"), PRODUCT_URL)
     assert parser.extract_data(soup)["title"] == "A Light in the Attic | Books to Scrape - Sandbox"
 
 
 @pytest.mark.parametrize("html", ["", None, "<<<>>>", "</div></html>"])
-async def test_parse_html_on_empty_or_garbage_page(parser, html):
-    soup = await parser.parse_html(html)
+async def test_make_soup_on_empty_or_garbage_page(parser, html):
+    soup = await parser.make_soup(html)
     assert isinstance(parser.extract_text(soup), str)
     assert parser.extract_links(soup, "http://site.test/") == []
     assert parser.extract_tables(soup) == [] and parser.extract_lists(soup) == []
@@ -179,6 +179,22 @@ def test_text_on_broken_html_with_unclosed_head(parser):
 @pytest.mark.parametrize("html", ["", None, "   ", "<html></html>"])
 def test_text_on_empty_page(parser, html):
     assert parser.extract_text(html) == ""
+
+
+def test_text_with_selector(parser):
+    html = """<title>T</title><div id="main"><p>first</p><script>x()</script><!-- c --><p>second</p></div>
+    <p class="note">n1</p><footer>foot</footer><p class="note"> n2 </p>"""
+    assert parser.extract_text(html, "#main") == "first second"
+    assert parser.extract_text(html, ".note") == "n1 n2"  # every match, document order
+    assert parser.extract_text(html, "title") == "T"  # selected element itself is not filtered out
+    assert parser.extract_text(html, ".missing") == ""
+    assert parser.extract_text(html, None) == parser.extract_text(html)
+
+
+async def test_text_with_selector_on_saved_product_page(parser):
+    soup = await parser.make_soup(load("books_product.html"))
+    assert parser.extract_text(soup, ".product_main h1") == "A Light in the Attic"
+    assert parser.extract_text(soup, ".product_main .price_color") == "£51.77"
 
 
 # --- extract_metadata --------------------------------------------------------
@@ -274,10 +290,10 @@ def test_lists(parser):
     ]
 
 
-# --- parse (full page breakdown) ---------------------------------------------
+# --- parse_html (full page breakdown) ---------------------------------------------
 
-async def test_parse_returns_all_sections(parser):
-    page = await parser.parse(load("books_product.html"), PRODUCT_URL)
+async def test_parse_html_returns_all_sections(parser):
+    page = await parser.parse_html(load("books_product.html"), PRODUCT_URL)
     assert set(page) == {"url", "title", "text", "links", "metadata", "images", "headings", "tables", "lists"}
     assert page["url"] == PRODUCT_URL
     assert page["title"] == page["metadata"]["title"] == "A Light in the Attic | Books to Scrape - Sandbox"
@@ -286,7 +302,7 @@ async def test_parse_returns_all_sections(parser):
     assert len(page["tables"]) == 1 and len(page["images"]) == 1
 
 
-async def test_parse_empty_page(parser):
-    page = await parser.parse("", "http://site.test/")
+async def test_parse_html_empty_page(parser):
+    page = await parser.parse_html("", "http://site.test/")
     assert page["title"] is None and page["text"] == "" and page["links"] == []
     assert page["images"] == [] and page["tables"] == [] and page["lists"] == []
